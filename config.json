@@ -1,0 +1,152 @@
+{
+  "SYMBOLS": [
+    "BTCUSD",
+    "ETHUSD",
+    "XAUTUSD",
+    "NVDAXUSD",
+    "AAPLXUSD",
+    "GOOGLXUSD",
+    "TSLAXUSD",
+    "METAXUSD",
+    "AMZNXUSD",
+    "COINXUSD",
+    "AMDBUSD",
+    "MSTRBUSD"
+  ],
+  "SYMBOL_TIMEFRAMES": {
+    "BTCUSD": [
+      "4h",
+      "1d"
+    ],
+    "ETHUSD": [
+      "4h",
+      "1d"
+    ],
+    "XAUTUSD": [
+      "1h",
+      "4h",
+      "1d"
+    ],
+    "NVDAXUSD": [
+      "1d",
+      "4h"
+    ],
+    "AAPLXUSD": [
+      "1d",
+      "4h"
+    ],
+    "GOOGLXUSD": [
+      "1d",
+      "4h"
+    ],
+    "TSLAXUSD": [
+      "1d",
+      "4h"
+    ],
+    "METAXUSD": [
+      "1d",
+      "4h"
+    ],
+    "AMZNXUSD": [
+      "1d",
+      "4h"
+    ],
+    "COINXUSD": [
+      "1d",
+      "4h"
+    ],
+    "AMDBUSD": [
+      "1d",
+      "4h"
+    ],
+    "MSTRBUSD": [
+      "1d",
+      "4h"
+    ]
+  },
+  "TIMEFRAMES": [
+    "1h",
+    "4h"
+  ],
+  "BREAKOUT_MODE": "INSTANT",
+  "MIN_BREAKOUT_PERCENT": 0.01,
+  "VOLUME_CONFIRMATION_ENABLED": true,
+  "MIN_VOLUME_RATIO": 0.20,
+  "ENABLE_QUALITY_FILTER": false,
+  "MIN_SETUP_SCORE": 20,
+  "NTFY_TOPIC": "delta_breakouts_ravi",
+  "ENABLE_NTFY_ALERTS": true,
+  "ENABLE_TRADE_TARGETS": false,
+  "ENABLE_TECHNICAL_METRICS": true,
+  "ENABLE_DAILY_AUDIT_REPORT": true,
+  "DAILY_AUDIT_TIME_IST": "08:00",
+  "ENABLE_WEEKLY_AUDIT_REPORT": true,
+  "WEEKLY_AUDIT_DAY_IST": "SUN",
+  "WEEKLY_AUDIT_TIME_IST": "18:00",
+  "SCHEDULE_ENABLED": true,
+  "US_STOCKS_FILTER_ENABLED": true,
+  "US_STOCKS_ACTIVE_HOURS_IST": {
+    "START": "18:30",
+    "END": "23:59"
+  },
+  "US_STOCKS": [
+    "NVDAXUSD",
+    "AAPLXUSD",
+    "GOOGLXUSD",
+    "TSLAXUSD",
+    "METAXUSD",
+    "AMZNXUSD",
+    "COINXUSD",
+    "AMDBUSD",
+    "MSTRBUSD"
+  ],
+  "OPERATING_SCHEDULE_IST": {
+    "MON": [
+      {
+        "START": "00:00",
+        "END": "23:59"
+      }
+    ],
+    "TUE": [
+      {
+        "START": "00:00",
+        "END": "23:59"
+      }
+    ],
+    "WED": [
+      {
+        "START": "00:00",
+        "END": "23:59"
+      }
+    ],
+    "THU": [
+      {
+        "START": "00:00",
+        "END": "23:59"
+      }
+    ],
+    "FRI": [
+      {
+        "START": "00:00",
+        "END": "23:59"
+      }
+    ],
+    "SAT": [],
+    "SUN": [
+      {
+        "START": "18:00",
+        "END": "23:59"
+      }
+    ]
+  },
+  "//_NOTE": "ALERT_COOLDOWN_MINUTES specifies the time-based cooldown window (in minutes) for continuation breakout alerts during an active candle period.",
+  "ALERT_COOLDOWN_MINUTES": 15,
+  "TELEGRAM_BOT_TOKEN": "8832242227:AAGVVxJtCirIB2P9YeENqww1EcdvStsRee8",
+  "TELEGRAM_CHAT_ID": "1208642587",
+  "DELTA_REST_URL": "https://api.india.delta.exchange",
+  "DELTA_WS_URL": "wss://public-socket.india.delta.exchange",
+  "LOG_FILE_PATH": "C:\\ProgramData\\DeltaAlerts\\app.log",
+  "HEARTBEAT_INTERVAL_HOURS": 12,
+  "REST_CONCURRENCY_LIMIT": 5,
+  "CONFIG_CHECK_INTERVAL_SECONDS": 30
+}

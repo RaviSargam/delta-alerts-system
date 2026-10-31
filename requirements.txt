@@ -1,0 +1,4 @@
+aiohttp>=3.8.0
+websockets>=11.0
+pywin32>=306; sys_platform == 'win32'
+
