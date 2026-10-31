@@ -32,6 +32,8 @@ from state_manager import (
     HealthMonitor,
     MuteState,
     ConfluenceTracker,
+    RetestTracker,
+    LifecycleTracker,
 )
 from ta_engine import (
     calculate_rsi,
@@ -43,7 +45,9 @@ from ta_engine import (
     calculate_trade_setup_score,
     get_rsi_status,
     get_trend_status,
+    format_oi_metrics,
 )
+from chart_generator import generate_breakout_chart
 from alert_auditor import AlertAuditor
 
 # ------------------------------------------------------------------
@@ -55,6 +59,8 @@ cooldown_tracker = CooldownTracker()
 health_monitor = HealthMonitor()
 mute_state = MuteState()
 confluence_tracker = ConfluenceTracker()
+retest_tracker = RetestTracker()
+lifecycle_tracker = LifecycleTracker()
 alert_auditor = AlertAuditor(config_mgr)
 
 logger = logging.getLogger("DeltaAlerts")
@@ -178,6 +184,56 @@ class TelegramNotifier:
 
         return False
 
+    async def send_photo(self, photo_bytes: bytes, caption: str, retries: int = 2, bypass_mute: bool = False) -> bool:
+        """Sends a chart snapshot photo with an alert caption to Telegram."""
+        if not bypass_mute and mute_state.is_muted():
+            logger.info("Photo alert suppressed (System is currently muted).")
+            return False
+
+        token = self.config.telegram_bot_token
+        chat_id = self.config.telegram_chat_id
+
+        if not token or not chat_id or "YOUR_TELEGRAM" in token:
+            return False
+
+        url = f"https://api.telegram.org/bot{token}/sendPhoto"
+
+        # Telegram caption max length is 1024 characters
+        send_full_text_after = False
+        if len(caption) > 1024:
+            photo_caption = caption[:1020] + "..."
+            send_full_text_after = True
+        else:
+            photo_caption = caption
+
+        data = aiohttp.FormData()
+        data.add_field("chat_id", str(chat_id))
+        data.add_field("caption", photo_caption)
+        data.add_field("parse_mode", "HTML")
+        data.add_field("photo", photo_bytes, filename="breakout_chart.png", content_type="image/png")
+
+        async with create_async_session() as session:
+            for attempt in range(1, retries + 1):
+                try:
+                    async with session.post(url, data=data, timeout=15) as resp:
+                        if resp.status == 200:
+                            health_monitor.record_alert_sent()
+                            logger.info("Telegram photo alert sent successfully.")
+                            if send_full_text_after:
+                                await self.send_message(caption, bypass_mute=bypass_mute)
+                            return True
+                        else:
+                            resp_text = await resp.text()
+                            logger.error(f"Telegram sendPhoto error HTTP {resp.status}: {resp_text}")
+                except Exception as e:
+                    logger.error(f"Failed sending Telegram photo alert (Attempt {attempt}/{retries}): {e}")
+
+                if attempt < retries:
+                    await asyncio.sleep(2)
+
+        # Graceful fallback to text message if photo fails
+        return await self.send_message(caption, retries=retries, bypass_mute=bypass_mute)
+
 
 # ------------------------------------------------------------------
 # ntfy.sh Mobile Push Notification Gateway
@@ -287,6 +343,7 @@ class DeltaRESTClient:
                             volumes=volumes,
                             high_prices=high_prices,
                             low_prices=low_prices,
+                            raw_candles=candles,
                         )
                         return True
 
@@ -323,6 +380,33 @@ class DeltaRESTClient:
             )
 
 
+async def fetch_delta_oi_metrics(symbol: str) -> Optional[Dict[str, Any]]:
+    """Fetches live Open Interest and Funding Rate metrics for a symbol from Delta Exchange."""
+    try:
+        url = f"{config_mgr.delta_rest_url.rstrip('/')}/v2/tickers/{normalize_symbol(symbol)}"
+        async with create_async_session() as session:
+            async with session.get(url, timeout=6) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    res = data.get("result", {})
+                    oi_usd = float(res.get("oi_value_usd") or 0.0)
+                    oi_change_6h = float(res.get("oi_change_usd_6h") or 0.0)
+                    funding = float(res.get("funding_rate") or 0.0)
+
+                    prev_oi = oi_usd - oi_change_6h
+                    oi_change_pct = (oi_change_6h / prev_oi * 100.0) if prev_oi > 0 else 0.0
+
+                    return {
+                        "oi_value_usd": oi_usd,
+                        "oi_change_usd_6h": oi_change_6h,
+                        "oi_change_pct_6h": oi_change_pct,
+                        "funding_rate_pct": funding * 100.0,
+                    }
+    except Exception as e:
+        logger.debug(f"Failed to fetch OI metrics for {symbol}: {e}")
+    return None
+
+
 # ------------------------------------------------------------------
 # Breakout Detection Logic
 # ------------------------------------------------------------------
@@ -342,6 +426,94 @@ async def evaluate_price_tick(
 
     if not config_mgr.is_symbol_allowed_at_time(norm_symbol):
         return
+
+    # ------------------------------------------------------------------
+    # 0. Evaluate Live Trade Lifecycle Tracking (TP1 / TP2 / SL Hits)
+    # ------------------------------------------------------------------
+    if config_mgr.enable_lifecycle_tracking:
+        lc_events = lifecycle_tracker.evaluate_tick(norm_symbol, current_price)
+        for ev in lc_events:
+            trade = ev["trade"]
+            cur = trade.get("currency_symbol", "$")
+            mins = max(1, int((time.time() - trade["created_at"]) / 60))
+            t_sym = trade["symbol"]
+            t_tf = trade["timeframe"]
+            is_bull = trade["direction"] in ["HIGH", "BULLISH"]
+
+            if ev["event"] == "TP1":
+                pct = ((ev["exit_price"] - trade["entry_price"]) / trade["entry_price"] * 100) if is_bull else ((trade["entry_price"] - ev["exit_price"]) / trade["entry_price"] * 100)
+                msg = (
+                    f"🎯 <b>TARGET 1 (TP1) HIT</b> 🎯\n\n"
+                    f"<b>Symbol:</b> #{t_sym} ({t_tf})\n"
+                    f"<b>Direction:</b> {'Bullish Breakout 🟢' if is_bull else 'Bearish Breakout 🔴'}\n"
+                    f"<b>Entry Price:</b> {cur}{trade['entry_price']:,.2f}\n"
+                    f"<b>Target 1:</b> {cur}{trade['tp1_price']:,.2f} (+{pct:.2f}%)\n"
+                    f"<b>Live Price:</b> {cur}{ev['exit_price']:,.2f}\n"
+                    f"<b>Elapsed Time:</b> {mins} mins\n\n"
+                    f"✨ <i>Risk:Reward 1:{config_mgr.target_1_rr:.1f} Achieved! You may lock in profit or move SL to Breakeven.</i>"
+                )
+                await notifier.send_message(msg)
+
+            elif ev["event"] == "TP2":
+                pct = ((ev["exit_price"] - trade["entry_price"]) / trade["entry_price"] * 100) if is_bull else ((trade["entry_price"] - ev["exit_price"]) / trade["entry_price"] * 100)
+                msg = (
+                    f"🏆 <b>TARGET 2 (RUNNER) HIT</b> 🏆\n\n"
+                    f"<b>Symbol:</b> #{t_sym} ({t_tf})\n"
+                    f"<b>Target 2:</b> {cur}{trade['tp2_price']:,.2f} (+{pct:.2f}%)\n"
+                    f"<b>Live Price:</b> {cur}{ev['exit_price']:,.2f}\n"
+                    f"<b>Elapsed Time:</b> {mins} mins\n\n"
+                    f"🔥 <i>Risk:Reward 1:{config_mgr.target_2_rr:.1f} Max Profit Target Hit!</i>"
+                )
+                await notifier.send_message(msg)
+
+            elif ev["event"] == "SL":
+                pct = ((ev["exit_price"] - trade["entry_price"]) / trade["entry_price"] * 100) if is_bull else ((trade["entry_price"] - ev["exit_price"]) / trade["entry_price"] * 100)
+                msg = (
+                    f"🛑 <b>STOP LOSS HIT / SETUP INVALIDATED</b> 🛑\n\n"
+                    f"<b>Symbol:</b> #{t_sym} ({t_tf})\n"
+                    f"<b>Entry Price:</b> {cur}{trade['entry_price']:,.2f}\n"
+                    f"<b>Stop Price:</b> {cur}{trade['sl_price']:,.2f} ({pct:+.2f}%)\n"
+                    f"<b>Live Price:</b> {cur}{ev['exit_price']:,.2f}\n"
+                    f"<b>Elapsed Time:</b> {mins} mins\n\n"
+                    f"⚠️ <i>Trade setup exited at risk boundary.</i>"
+                )
+                await notifier.send_message(msg)
+
+    # ------------------------------------------------------------------
+    # 0.1 Evaluate Breakout Retest & Bounce Confirmation
+    # ------------------------------------------------------------------
+    if config_mgr.enable_retest_alerts:
+        retests = retest_tracker.evaluate_tick(norm_symbol, current_price, tolerance_pct=config_mgr.retest_tolerance_pct)
+        for ret in retests:
+            is_bull = ret["direction"] == "HIGH"
+            chart_url = get_delta_chart_url(norm_symbol)
+            cur = "₹" if "INR" in norm_symbol else "$"
+            bounce_pct = ((ret["bounce_price"] - ret["boundary_level"]) / ret["boundary_level"] * 100) if is_bull else ((ret["boundary_level"] - ret["bounce_price"]) / ret["boundary_level"] * 100)
+
+            retest_msg = (
+                f"🎯 <b>BREAKOUT RETEST &amp; BOUNCE CONFIRMED</b> 🎯\n\n"
+                f"<b>Symbol:</b> #{ret['symbol']}\n"
+                f"<b>Timeframe:</b> {ret['timeframe']}\n"
+                f"<b>Direction:</b> {'Bullish Retest (Held Support 🟢)' if is_bull else 'Bearish Retest (Held Resistance 🔴)'}\n"
+                f"<b>Broken Level:</b> {cur}{ret['boundary_level']:,.2f}\n"
+                f"<b>Retest Level:</b> {cur}{ret['pullback_extreme']:,.2f}\n"
+                f"<b>Bounce Price:</b> {cur}{ret['bounce_price']:,.2f} ({bounce_pct:+.2f}%)\n"
+                f"<b>Timestamp:</b> {time.strftime('%Y-%m-%d %H:%M:%S IST')}\n\n"
+                f"🔥 <i>High-probability retest continuation confirmed!</i>\n"
+                f"📈 <a href='{chart_url}'>View on Delta Exchange</a>"
+            )
+            # Send photo or message for retest
+            boundary = boundary_state.get_boundary(norm_symbol, ret["timeframe"])
+            chart_buf = None
+            if config_mgr.enable_chart_snapshots and boundary and boundary.raw_candles:
+                chart_buf = generate_breakout_chart(
+                    norm_symbol, ret["timeframe"], boundary.raw_candles, ret["boundary_level"], ret["direction"], current_price, cur
+                )
+
+            if chart_buf:
+                await notifier.send_photo(chart_buf.getvalue(), retest_msg)
+            else:
+                await notifier.send_message(retest_msg)
 
     timeframes = config_mgr.get_timeframes_for_symbol(norm_symbol)
 
@@ -399,12 +571,33 @@ async def evaluate_price_tick(
                 cooldown_tracker.record_alert(norm_symbol, tf, "HIGH", candle_time, current_price=current_price)
                 chart_url = get_delta_chart_url(norm_symbol)
 
+                # Register into Retest Tracker
+                if config_mgr.enable_retest_alerts:
+                    retest_tracker.register_breakout(norm_symbol, tf, "HIGH", high_level, current_price, candle_time)
+
+                targets = calculate_trade_targets(
+                    "HIGH", current_price, high_level, atr, currency_symbol, rr1=config_mgr.target_1_rr, rr2=config_mgr.target_2_rr
+                )
+
+                # Register into Lifecycle Tracker
+                if config_mgr.enable_lifecycle_tracking:
+                    lifecycle_tracker.register_trade(
+                        norm_symbol, tf, "HIGH", current_price, targets["sl"], targets["tp1"], targets["tp2"], candle_time, currency_symbol
+                    )
+
+                # If user only wants confirmed retests, skip the initial breakout notification
+                if config_mgr.alert_on_retest_only:
+                    logger.info(f"Breakout [{norm_symbol} {tf}] registered for Retest confirmation (Initial alert suppressed).")
+                    continue
+
                 rsi_text = get_rsi_status(rsi)
                 trend_text = get_trend_status(current_price, ema20)
                 vol_text = f"{vol_ratio:.1f}x Avg Volume 💥" if vol_ratio and vol_ratio >= 1.2 else (f"{vol_ratio:.1f}x Avg Volume" if vol_ratio else "Normal")
                 atr_text = f"{(atr / current_price * 100):.2f}% (Volatility Expansion 💥)" if atr else "N/A"
 
-                targets = calculate_trade_targets("HIGH", current_price, high_level, atr, currency_symbol)
+                # Fetch live Delta Open Interest metrics
+                oi_data = await fetch_delta_oi_metrics(norm_symbol) if config_mgr.enable_oi_metrics else None
+                oi_text = format_oi_metrics(oi_data, "HIGH")
 
                 if is_confluent:
                     title_header = f"🔥 <b>MULTI-TIMEFRAME CONFLUENCE BULLISH BREAKOUT</b> 🔥\n<b>Confluence:</b> {', '.join(confluent_tfs).upper()}"
@@ -425,14 +618,19 @@ async def evaluate_price_tick(
                     msg_parts.append(f"\n{targets['formatted']}")
 
                 if config_mgr.enable_technical_metrics:
-                    msg_parts.append(
-                        f"\n📊 <b>TECHNICAL METRICS</b>\n"
-                        f"• <b>RSI (14):</b> {rsi_text}\n"
-                        f"• <b>Trend (20 EMA):</b> {trend_text}\n"
-                        f"• <b>Volume:</b> {vol_text}\n"
-                        f"• <b>ATR (14):</b> {atr_text}\n"
-                        f"• <b>Consolidation:</b> {squeeze_text}"
-                    )
+                    tech_lines = [
+                        f"\n📊 <b>TECHNICAL METRICS</b>",
+                        f"• <b>RSI (14):</b> {rsi_text}",
+                        f"• <b>Trend (20 EMA):</b> {trend_text}",
+                        f"• <b>Volume:</b> {vol_text}",
+                    ]
+                    if config_mgr.enable_oi_metrics:
+                        tech_lines.append(f"• <b>Open Interest (6h):</b> {oi_text}")
+                    tech_lines.extend([
+                        f"• <b>ATR (14):</b> {atr_text}",
+                        f"• <b>Consolidation:</b> {squeeze_text}",
+                    ])
+                    msg_parts.append("\n".join(tech_lines))
 
                 msg_parts.append(
                     f"\n<b>Candle Period:</b> {time.strftime('%Y-%m-%d %H:%M IST', time.localtime(candle_time))}\n"
@@ -444,7 +642,18 @@ async def evaluate_price_tick(
                 logger.warning(
                     f"ALERT: Bullish Breakout [{norm_symbol} {tf}] Price {current_price} > High {high_level} (+{breakout_pct:.2f}%) Score={setup_score}"
                 )
-                await notifier.send_message(alert_text)
+
+                # Send with Chart Snapshot if enabled
+                chart_buf = None
+                if config_mgr.enable_chart_snapshots and boundary.raw_candles:
+                    chart_buf = generate_breakout_chart(
+                        norm_symbol, tf, boundary.raw_candles, high_level, "HIGH", current_price, currency_symbol
+                    )
+
+                if chart_buf:
+                    await notifier.send_photo(chart_buf.getvalue(), alert_text)
+                else:
+                    await notifier.send_message(alert_text)
 
                 if ntfy_notifier:
                     ntfy_title = f"🚀 BULLISH BREAKOUT: #{norm_symbol} ({tf})"
@@ -505,12 +714,33 @@ async def evaluate_price_tick(
                 cooldown_tracker.record_alert(norm_symbol, tf, "LOW", candle_time, current_price=current_price)
                 chart_url = get_delta_chart_url(norm_symbol)
 
+                # Register into Retest Tracker
+                if config_mgr.enable_retest_alerts:
+                    retest_tracker.register_breakout(norm_symbol, tf, "LOW", low_level, current_price, candle_time)
+
+                targets = calculate_trade_targets(
+                    "LOW", current_price, low_level, atr, currency_symbol, rr1=config_mgr.target_1_rr, rr2=config_mgr.target_2_rr
+                )
+
+                # Register into Lifecycle Tracker
+                if config_mgr.enable_lifecycle_tracking:
+                    lifecycle_tracker.register_trade(
+                        norm_symbol, tf, "LOW", current_price, targets["sl"], targets["tp1"], targets["tp2"], candle_time, currency_symbol
+                    )
+
+                # If user only wants confirmed retests, skip the initial breakout notification
+                if config_mgr.alert_on_retest_only:
+                    logger.info(f"Breakout [{norm_symbol} {tf}] registered for Retest confirmation (Initial alert suppressed).")
+                    continue
+
                 rsi_text = get_rsi_status(rsi)
                 trend_text = get_trend_status(current_price, ema20)
                 vol_text = f"{vol_ratio:.1f}x Avg Volume 💥" if vol_ratio and vol_ratio >= 1.2 else (f"{vol_ratio:.1f}x Avg Volume" if vol_ratio else "Normal")
                 atr_text = f"{(atr / current_price * 100):.2f}% (Volatility Expansion 💥)" if atr else "N/A"
 
-                targets = calculate_trade_targets("LOW", current_price, low_level, atr, currency_symbol)
+                # Fetch live Delta Open Interest metrics
+                oi_data = await fetch_delta_oi_metrics(norm_symbol) if config_mgr.enable_oi_metrics else None
+                oi_text = format_oi_metrics(oi_data, "LOW")
 
                 if is_confluent:
                     title_header = f"🔥 <b>MULTI-TIMEFRAME CONFLUENCE BEARISH BREAKOUT</b> 🔥\n<b>Confluence:</b> {', '.join(confluent_tfs).upper()}"
@@ -531,14 +761,19 @@ async def evaluate_price_tick(
                     msg_parts.append(f"\n{targets['formatted']}")
 
                 if config_mgr.enable_technical_metrics:
-                    msg_parts.append(
-                        f"\n📊 <b>TECHNICAL METRICS</b>\n"
-                        f"• <b>RSI (14):</b> {rsi_text}\n"
-                        f"• <b>Trend (20 EMA):</b> {trend_text}\n"
-                        f"• <b>Volume:</b> {vol_text}\n"
-                        f"• <b>ATR (14):</b> {atr_text}\n"
-                        f"• <b>Consolidation:</b> {squeeze_text}"
-                    )
+                    tech_lines = [
+                        f"\n📊 <b>TECHNICAL METRICS</b>",
+                        f"• <b>RSI (14):</b> {rsi_text}",
+                        f"• <b>Trend (20 EMA):</b> {trend_text}",
+                        f"• <b>Volume:</b> {vol_text}",
+                    ]
+                    if config_mgr.enable_oi_metrics:
+                        tech_lines.append(f"• <b>Open Interest (6h):</b> {oi_text}")
+                    tech_lines.extend([
+                        f"• <b>ATR (14):</b> {atr_text}",
+                        f"• <b>Consolidation:</b> {squeeze_text}",
+                    ])
+                    msg_parts.append("\n".join(tech_lines))
 
                 msg_parts.append(
                     f"\n<b>Candle Period:</b> {time.strftime('%Y-%m-%d %H:%M IST', time.localtime(candle_time))}\n"
@@ -550,7 +785,18 @@ async def evaluate_price_tick(
                 logger.warning(
                     f"ALERT: Bearish Breakout [{norm_symbol} {tf}] Price {current_price} < Low {low_level} (-{breakout_pct:.2f}%) Score={setup_score}"
                 )
-                await notifier.send_message(alert_text)
+
+                # Send with Chart Snapshot if enabled
+                chart_buf = None
+                if config_mgr.enable_chart_snapshots and boundary.raw_candles:
+                    chart_buf = generate_breakout_chart(
+                        norm_symbol, tf, boundary.raw_candles, low_level, "LOW", current_price, currency_symbol
+                    )
+
+                if chart_buf:
+                    await notifier.send_photo(chart_buf.getvalue(), alert_text)
+                else:
+                    await notifier.send_message(alert_text)
 
                 if ntfy_notifier:
                     ntfy_title = f"🔻 BEARISH BREAKOUT: #{norm_symbol} ({tf})"
@@ -823,16 +1069,21 @@ async def telegram_command_listener_task(notifier: TelegramNotifier):
                                 sched_active = config_mgr.is_within_operating_schedule()
                                 sched_str = "🟢 Active (Operating Hours)" if sched_active else "🔕 Quiet (Outside Operating Hours)"
                                 us_window_str = f"{config_mgr.us_stocks_active_hours_ist.get('START', '18:30')} - {config_mgr.us_stocks_active_hours_ist.get('END', '23:59')} IST" if config_mgr.us_stocks_filter_enabled else "24/7"
+                                retest_status = "🟢 Enabled" if config_mgr.enable_retest_alerts else "🔴 Disabled"
+                                lifecycle_status = f"🟢 Active (1:{config_mgr.target_1_rr:.1f} / 1:{config_mgr.target_2_rr:.1f} RR)" if config_mgr.enable_lifecycle_tracking else "🔴 Disabled"
+                                chart_status = "🟢 Active (PNG)" if config_mgr.enable_chart_snapshots else "🔴 Off"
+                                oi_status = "🟢 Active" if config_mgr.enable_oi_metrics else "🔴 Off"
                                 reply = (
                                     f"📊 <b>DELTA SYSTEM STATUS</b> 📊\n\n"
                                     f"<b>Service Status:</b> {'🟢 Online' if summary['is_ws_connected'] else '🔴 Disconnected'}\n"
                                     f"<b>Alert Mode:</b> {mute_str}\n"
-                                    f"<b>Schedule Status:</b> {sched_str}\n"
-                                    f"<b>US Stocks Window:</b> {us_window_str}\n"
-                                    f"<b>Breakout Mode:</b> {config_mgr.breakout_mode}\n"
-                                    f"<b>ntfy Topic:</b> {config_mgr.ntfy_topic}\n"
+                                    f"<b>Schedule:</b> {sched_str}\n"
+                                    f"<b>US Window:</b> {us_window_str}\n"
+                                    f"<b>Retest Alerts:</b> {retest_status}\n"
+                                    f"<b>Lifecycle Tracking:</b> {lifecycle_status}\n"
+                                    f"<b>Chart Snapshots:</b> {chart_status}\n"
+                                    f"<b>Open Interest:</b> {oi_status}\n"
                                     f"<b>Uptime:</b> {summary['uptime']}\n"
-                                    f"<b>Active Symbols:</b> {len(config_mgr.symbols)}\n"
                                     f"<b>Active Pairs:</b> {len(config_mgr.get_active_pairs())}\n"
                                     f"<b>WS Messages:</b> {summary['total_ws_messages']:,}\n"
                                     f"<b>Alerts Sent:</b> {summary['total_alerts_sent']}\n"
@@ -892,11 +1143,39 @@ async def telegram_command_listener_task(notifier: TelegramNotifier):
                                     logger.error(f"Error executing on-demand audit command: {e}")
                                     await notifier.send_message(f"❌ <b>Audit Error:</b> {e}", bypass_mute=True)
 
+                            elif cmd == "/check":
+                                if len(cmd_parts) < 2:
+                                    reply = "ℹ️ <b>Usage:</b> <code>/check BTCUSD</code> or <code>/check ETH</code>"
+                                else:
+                                    target_sym = normalize_symbol(cmd_parts[1])
+                                    lines = [f"🔍 <b>LEVEL CHECK: #{target_sym}</b> 🔍\n"]
+                                    tfs = config_mgr.get_timeframes_for_symbol(target_sym)
+                                    cur = "₹" if "INR" in target_sym else "$"
+
+                                    found = False
+                                    for tf in tfs:
+                                        b = boundary_state.get_boundary(target_sym, tf)
+                                        if b:
+                                            found = True
+                                            lines.append(
+                                                f"• <b>{tf.upper()} Boundaries:</b>\n"
+                                                f"   High: {cur}{b.high:,.2f}\n"
+                                                f"   Low:  {cur}{b.low:,.2f}"
+                                            )
+
+                                    if not found:
+                                        lines.append(f"⚠️ No active boundaries found for <b>#{target_sym}</b>. Check /symbols.")
+                                    else:
+                                        lines.append(f"\n📈 <a href='{get_delta_chart_url(target_sym)}'>Open Chart on Delta</a>")
+                                    reply = "\n".join(lines)
+                                await notifier.send_message(reply, bypass_mute=True)
+
                             elif cmd == "/help":
                                 reply = (
                                     "🤖 <b>DELTA ALERT BOT COMMANDS</b> 🤖\n\n"
-                                    "• <b>/status</b> - Show system health & uptime\n"
+                                    "• <b>/status</b> - Show system health & active features\n"
                                     "• <b>/symbols</b> - List all active symbols and timeframes\n"
+                                    "• <b>/check [symbol]</b> - Check current boundaries for any symbol\n"
                                     "• <b>/audit [24h|7d|30d|all]</b> - Breakout accuracy & win-rate audit\n"
                                     "• <b>/mute [mins]</b> - Mute alerts for X minutes (default 30m)\n"
                                     "• <b>/unmute</b> - Resume alert notifications\n"

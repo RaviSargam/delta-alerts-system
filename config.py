@@ -225,6 +225,14 @@ class ConfigManager:
             "ENABLE_NTFY_ALERTS": enable_ntfy,
             "ENABLE_TRADE_TARGETS": enable_trade_targets,
             "ENABLE_TECHNICAL_METRICS": enable_technical_metrics,
+            "ENABLE_RETEST_ALERTS": bool(data.get("ENABLE_RETEST_ALERTS", True)),
+            "ALERT_ON_RETEST_ONLY": bool(data.get("ALERT_ON_RETEST_ONLY", false if "false" in str(data) else False)),
+            "RETEST_TOLERANCE_PCT": float(data.get("RETEST_TOLERANCE_PCT", 0.40)),
+            "ENABLE_LIFECYCLE_TRACKING": bool(data.get("ENABLE_LIFECYCLE_TRACKING", True)),
+            "TARGET_1_RR": float(data.get("TARGET_1_RR", 1.5)),
+            "TARGET_2_RR": float(data.get("TARGET_2_RR", 3.0)),
+            "ENABLE_OI_METRICS": bool(data.get("ENABLE_OI_METRICS", True)),
+            "ENABLE_CHART_SNAPSHOTS": bool(data.get("ENABLE_CHART_SNAPSHOTS", True)),
             "SCHEDULE_ENABLED": schedule_enabled,
             "OPERATING_SCHEDULE_IST": raw_schedule,
             "US_STOCKS_FILTER_ENABLED": us_stocks_filter,
@@ -465,6 +473,38 @@ class ConfigManager:
     @property
     def weekly_audit_day_ist(self) -> str:
         return self.config_data.get("WEEKLY_AUDIT_DAY_IST", "SUN")
+
+    @property
+    def enable_retest_alerts(self) -> bool:
+        return self.config_data.get("ENABLE_RETEST_ALERTS", True)
+
+    @property
+    def alert_on_retest_only(self) -> bool:
+        return self.config_data.get("ALERT_ON_RETEST_ONLY", False)
+
+    @property
+    def retest_tolerance_pct(self) -> float:
+        return self.config_data.get("RETEST_TOLERANCE_PCT", 0.40)
+
+    @property
+    def enable_lifecycle_tracking(self) -> bool:
+        return self.config_data.get("ENABLE_LIFECYCLE_TRACKING", True)
+
+    @property
+    def target_1_rr(self) -> float:
+        return self.config_data.get("TARGET_1_RR", 1.5)
+
+    @property
+    def target_2_rr(self) -> float:
+        return self.config_data.get("TARGET_2_RR", 3.0)
+
+    @property
+    def enable_oi_metrics(self) -> bool:
+        return self.config_data.get("ENABLE_OI_METRICS", True)
+
+    @property
+    def enable_chart_snapshots(self) -> bool:
+        return self.config_data.get("ENABLE_CHART_SNAPSHOTS", True)
 
     @property
     def weekly_audit_time_ist(self) -> str:

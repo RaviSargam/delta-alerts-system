@@ -44,9 +44,32 @@ A production-grade, highly resilient asynchronous Python application monitoring 
   - `/audit 7d`: Audits last 7 days.
   - `/audit 30d`: Audits last 30 days.
   - `/audit all`: Audits all-time alert history.
+  - `/check [symbol]`: Checks live High/Low boundaries on demand.
 - **Automated Audit Scheduling**:
   - `"ENABLE_DAILY_AUDIT_REPORT": true` at `"DAILY_AUDIT_TIME_IST": "08:00"`.
   - `"ENABLE_WEEKLY_AUDIT_REPORT": true` on `"WEEKLY_AUDIT_DAY_IST": "SUN"` at `"WEEKLY_AUDIT_TIME_IST": "18:00"`.
+
+### 6. Breakout Retest & Bounce Confirmation
+- `RetestTracker` in `state_manager.py`: Monitors breakouts for price pullbacks to the broken boundary level within a configured tolerance (`"RETEST_TOLERANCE_PCT": 0.40`). When price bounces away in the breakout direction, a high-confidence Retest Confirmed notification is dispatched.
+- `"ENABLE_RETEST_ALERTS": true`
+- `"ALERT_ON_RETEST_ONLY": false` (Set to `true` to only receive retest alerts and skip initial wicks).
+
+### 7. Live Trade Lifecycle Tracking (TP1 / TP2 / SL Hits)
+- `LifecycleTracker` in `state_manager.py`: Tracks all active trade setups in real-time.
+- Automatically sends Telegram follow-up notifications when Target 1 (TP1) is reached, Target 2 (TP2) is reached, or when the setup invalidates at Stop-Loss (SL).
+- `"ENABLE_LIFECYCLE_TRACKING": true`
+- `"TARGET_1_RR": 1.5`, `"TARGET_2_RR": 3.0`
+
+### 8. Live Open Interest (OI) & Funding Rate Confluence
+- Directly queries Delta Exchange Ticker API (`/v2/tickers/{symbol}`) to calculate 6-hour OI USD changes and funding rate.
+- Categorizes sentiment: Institutional Inflow (OI surge > 2%), Short Squeeze Trap (OI drop < -2%), or Steady.
+- Included seamlessly in Telegram Technical Metrics.
+- `"ENABLE_OI_METRICS": true`
+
+### 9. Dark-Themed Candlestick Chart Snapshots
+- `chart_generator.py`: Generates ultra-lightweight in-memory PNG candlestick charts (~35 KB) via Matplotlib highlighting the broken boundary, 20 EMA, and volume bars.
+- Sent directly with Telegram alerts via `sendPhoto` (< 1% of Render monthly bandwidth).
+- `"ENABLE_CHART_SNAPSHOTS": true`
 
 ---
 

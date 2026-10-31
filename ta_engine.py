@@ -135,9 +135,11 @@ def calculate_trade_targets(
     boundary_level: float,
     atr: Optional[float],
     currency_symbol: str = "$",
+    rr1: float = 1.5,
+    rr2: float = 3.0,
 ) -> Dict[str, Any]:
     """
-    Calculates entry, stop loss, and take profit targets based on 1:1.5 and 1:3.0 Risk-to-Reward ratios.
+    Calculates entry, stop loss, and take profit targets based on customizable Risk-to-Reward ratios.
     """
     # Fallback risk buffer if ATR is not available (1.0% buffer)
     risk_buffer = atr * 0.8 if (atr and atr > 0) else current_price * 0.01
@@ -145,8 +147,8 @@ def calculate_trade_targets(
     if direction.upper() in ["HIGH", "BULLISH"]:
         sl_price = max(boundary_level - risk_buffer, current_price * 0.95)
         risk = max(current_price - sl_price, current_price * 0.005)
-        tp1 = current_price + (1.5 * risk)
-        tp2 = current_price + (3.0 * risk)
+        tp1 = current_price + (rr1 * risk)
+        tp2 = current_price + (rr2 * risk)
 
         sl_pct = ((current_price - sl_price) / current_price) * 100.0
         tp1_pct = ((tp1 - current_price) / current_price) * 100.0
@@ -164,15 +166,15 @@ def calculate_trade_targets(
                 f"🎯 <b>TRADE PLAN & TARGETS</b>\n"
                 f"• <b>Entry:</b> {currency_symbol}{current_price:,.2f}\n"
                 f"• <b>Stop Loss:</b> {currency_symbol}{sl_price:,.2f} (-{sl_pct:.2f}%)\n"
-                f"• <b>Target 1 (1:1.5 RR):</b> {currency_symbol}{tp1:,.2f} (+{tp1_pct:.2f}%)\n"
-                f"• <b>Target 2 (1:3.0 RR):</b> {currency_symbol}{tp2:,.2f} (+{tp2_pct:.2f}%)"
+                f"• <b>Target 1 (1:{rr1:.1f} RR):</b> {currency_symbol}{tp1:,.2f} (+{tp1_pct:.2f}%)\n"
+                f"• <b>Target 2 (1:{rr2:.1f} RR):</b> {currency_symbol}{tp2:,.2f} (+{tp2_pct:.2f}%)"
             ),
         }
     else:  # Bearish
         sl_price = min(boundary_level + risk_buffer, current_price * 1.05)
         risk = max(sl_price - current_price, current_price * 0.005)
-        tp1 = current_price - (1.5 * risk)
-        tp2 = current_price - (3.0 * risk)
+        tp1 = current_price - (rr1 * risk)
+        tp2 = current_price - (rr2 * risk)
 
         sl_pct = ((sl_price - current_price) / current_price) * 100.0
         tp1_pct = ((current_price - tp1) / current_price) * 100.0
@@ -190,8 +192,8 @@ def calculate_trade_targets(
                 f"🎯 <b>TRADE PLAN & TARGETS</b>\n"
                 f"• <b>Entry:</b> {currency_symbol}{current_price:,.2f}\n"
                 f"• <b>Stop Loss:</b> {currency_symbol}{sl_price:,.2f} (+{sl_pct:.2f}%)\n"
-                f"• <b>Target 1 (1:1.5 RR):</b> {currency_symbol}{tp1:,.2f} (-{tp1_pct:.2f}%)\n"
-                f"• <b>Target 2 (1:3.0 RR):</b> {currency_symbol}{tp2:,.2f} (-{tp2_pct:.2f}%)"
+                f"• <b>Target 1 (1:{rr1:.1f} RR):</b> {currency_symbol}{tp1:,.2f} (-{tp1_pct:.2f}%)\n"
+                f"• <b>Target 2 (1:{rr2:.1f} RR):</b> {currency_symbol}{tp2:,.2f} (-{tp2_pct:.2f}%)"
             ),
         }
 
@@ -293,3 +295,35 @@ def get_trend_status(current_price: float, ema20: Optional[float]) -> str:
         return f"🟢 Bullish (Price > 20 EMA ${ema20:,.2f})"
     else:
         return f"🔻 Bearish (Price &lt; 20 EMA ${ema20:,.2f})"
+
+
+def format_oi_metrics(oi_data: Optional[Dict[str, Any]], direction: str) -> str:
+    """Formats Open Interest and Funding Rate data for Telegram alerts."""
+    if not oi_data:
+        return "N/A"
+
+    change_pct = oi_data.get("oi_change_pct_6h", 0.0)
+    funding_rate = oi_data.get("funding_rate_pct", 0.0)
+
+    dir_upper = direction.upper()
+    is_bullish = dir_upper in ["HIGH", "BULLISH"]
+
+    # Sentiment Tag
+    if is_bullish:
+        if change_pct >= 2.0:
+            sentiment = f"↗️ +{change_pct:.1f}% (Institutional Inflow 🔥)"
+        elif change_pct <= -2.0:
+            sentiment = f"↘️ {change_pct:.1f}% (Short Squeeze Trap ⚠️)"
+        else:
+            sentiment = f"↔️ {change_pct:+.1f}% (Stable)"
+    else:
+        if change_pct >= 2.0:
+            sentiment = f"↗️ +{change_pct:.1f}% (Aggressive Short Build-up 💥)"
+        elif change_pct <= -2.0:
+            sentiment = f"↘️ {change_pct:.1f}% (Long Liquidation Dump ⚠️)"
+        else:
+            sentiment = f"↔️ {change_pct:+.1f}% (Stable)"
+
+    funding_str = f" | Funding: {funding_rate:+.4f}%" if funding_rate != 0 else ""
+    return f"{sentiment}{funding_str}"
+

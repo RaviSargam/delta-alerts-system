@@ -26,6 +26,7 @@ class CandleBoundary:
     volumes: List[float] = None
     high_prices: List[float] = None
     low_prices: List[float] = None
+    raw_candles: List[Dict[str, Any]] = None
 
 
 class BoundaryState:
@@ -49,6 +50,7 @@ class BoundaryState:
         volumes: Optional[List[float]] = None,
         high_prices: Optional[List[float]] = None,
         low_prices: Optional[List[float]] = None,
+        raw_candles: Optional[List[Dict[str, Any]]] = None,
     ):
         with self._lock:
             key = (symbol.upper(), timeframe.lower())
@@ -63,6 +65,7 @@ class BoundaryState:
                 volumes=volumes or [],
                 high_prices=high_prices or [],
                 low_prices=low_prices or [],
+                raw_candles=raw_candles or [],
             )
             logger.info(
                 f"Updated boundary [{symbol} {timeframe}]: High={high}, Low={low}, CandleTime={candle_time}"
@@ -380,3 +383,212 @@ class ConfluenceTracker:
                 if (now - ts) <= 300.0
             ]
             return confluent_tfs
+
+
+class RetestTracker:
+    """
+    Tracks confirmed breakouts and monitors price pullbacks to the broken boundary
+    for a high-probability 'Retest & Bounce' confirmation.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        # Key: (symbol, timeframe, direction, candle_time) -> dict
+        self._active_retests: Dict[Tuple[str, str, str, int], Dict[str, Any]] = {}
+
+    def register_breakout(
+        self,
+        symbol: str,
+        timeframe: str,
+        direction: str,
+        boundary_level: float,
+        breakout_price: float,
+        candle_time: int,
+    ):
+        with self._lock:
+            key = (symbol.upper(), timeframe.lower(), direction.upper(), int(candle_time))
+            if key not in self._active_retests:
+                self._active_retests[key] = {
+                    "symbol": symbol.upper(),
+                    "timeframe": timeframe.lower(),
+                    "direction": direction.upper(),
+                    "boundary_level": boundary_level,
+                    "breakout_price": breakout_price,
+                    "candle_time": int(candle_time),
+                    "created_at": time.time(),
+                    "pullback_reached": False,
+                    "pullback_extreme": breakout_price,
+                    "confirmed": False,
+                }
+
+    def evaluate_tick(
+        self,
+        symbol: str,
+        current_price: float,
+        tolerance_pct: float = 0.40,
+    ) -> List[Dict[str, Any]]:
+        """
+        Evaluates current price against active retests. Returns any newly confirmed retests.
+        """
+        confirmed_retests = []
+        now = time.time()
+        sym_upper = symbol.upper()
+
+        with self._lock:
+            keys_to_remove = []
+            for key, item in self._active_retests.items():
+                if item["symbol"] != sym_upper or item["confirmed"]:
+                    continue
+
+                # Expire after 12 hours
+                if now - item["created_at"] > 43200:
+                    keys_to_remove.append(key)
+                    continue
+
+                level = item["boundary_level"]
+                dir_upper = item["direction"]
+                tol_margin = level * (tolerance_pct / 100.0)
+
+                if dir_upper == "HIGH":  # Bullish
+                    # Check if price pulled back into the retest zone [level - tol, level + tol]
+                    if not item["pullback_reached"]:
+                        if current_price <= (level + tol_margin):
+                            item["pullback_reached"] = True
+                            item["pullback_extreme"] = current_price
+                    else:
+                        item["pullback_extreme"] = min(item["pullback_extreme"], current_price)
+                        # Bounce confirmation: price turns back up above level + 0.15% and above pullback extreme
+                        if current_price >= (level + tol_margin * 0.4) and current_price >= item["pullback_extreme"] * 1.002:
+                            item["confirmed"] = True
+                            item["bounce_price"] = current_price
+                            confirmed_retests.append(dict(item))
+
+                elif dir_upper == "LOW":  # Bearish
+                    # Check if price pulled back up into the retest zone [level - tol, level + tol]
+                    if not item["pullback_reached"]:
+                        if current_price >= (level - tol_margin):
+                            item["pullback_reached"] = True
+                            item["pullback_extreme"] = current_price
+                    else:
+                        item["pullback_extreme"] = max(item["pullback_extreme"], current_price)
+                        # Bounce confirmation: price turns back down below level - 0.15% and below pullback extreme
+                        if current_price <= (level - tol_margin * 0.4) and current_price <= item["pullback_extreme"] * 0.998:
+                            item["confirmed"] = True
+                            item["bounce_price"] = current_price
+                            confirmed_retests.append(dict(item))
+
+            for k in keys_to_remove:
+                self._active_retests.pop(k, None)
+
+        return confirmed_retests
+
+
+class LifecycleTracker:
+    """
+    Tracks open trade setups in real-time, monitoring price movements to notify
+    when Target 1 (TP1), Target 2 (TP2), or Stop Loss (SL) is hit.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._active_trades: Dict[str, Dict[str, Any]] = {}
+
+    def register_trade(
+        self,
+        symbol: str,
+        timeframe: str,
+        direction: str,
+        entry_price: float,
+        sl_price: float,
+        tp1_price: float,
+        tp2_price: float,
+        candle_time: int,
+        currency_symbol: str = "$",
+    ):
+        with self._lock:
+            trade_id = f"{symbol.upper()}_{timeframe.lower()}_{direction.upper()}_{int(candle_time)}"
+            if trade_id not in self._active_trades:
+                self._active_trades[trade_id] = {
+                    "id": trade_id,
+                    "symbol": symbol.upper(),
+                    "timeframe": timeframe.lower(),
+                    "direction": direction.upper(),
+                    "entry_price": entry_price,
+                    "sl_price": sl_price,
+                    "tp1_price": tp1_price,
+                    "tp2_price": tp2_price,
+                    "candle_time": int(candle_time),
+                    "currency_symbol": currency_symbol,
+                    "created_at": time.time(),
+                    "tp1_hit": False,
+                    "tp2_hit": False,
+                    "sl_hit": False,
+                }
+
+    def evaluate_tick(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
+        """
+        Evaluates current price against active trade setups.
+        Returns a list of event dictionaries: {"event": "TP1"|"TP2"|"SL", "trade": ...}
+        """
+        events = []
+        now = time.time()
+        sym_upper = symbol.upper()
+
+        with self._lock:
+            completed_ids = []
+            for trade_id, trade in self._active_trades.items():
+                if trade["symbol"] != sym_upper:
+                    continue
+
+                # Expire after 24 hours
+                if now - trade["created_at"] > 86400:
+                    completed_ids.append(trade_id)
+                    continue
+
+                dir_upper = trade["direction"]
+
+                if dir_upper in ["HIGH", "BULLISH"]:
+                    # Check Stop Loss (only if TP1 hasn't been hit yet)
+                    if not trade["tp1_hit"] and not trade["sl_hit"]:
+                        if current_price <= trade["sl_price"]:
+                            trade["sl_hit"] = True
+                            completed_ids.append(trade_id)
+                            events.append({"event": "SL", "trade": dict(trade), "exit_price": current_price})
+                            continue
+
+                    # Check Target 1
+                    if not trade["tp1_hit"] and current_price >= trade["tp1_price"]:
+                        trade["tp1_hit"] = True
+                        events.append({"event": "TP1", "trade": dict(trade), "exit_price": current_price})
+
+                    # Check Target 2
+                    if trade["tp1_hit"] and not trade["tp2_hit"] and current_price >= trade["tp2_price"]:
+                        trade["tp2_hit"] = True
+                        completed_ids.append(trade_id)
+                        events.append({"event": "TP2", "trade": dict(trade), "exit_price": current_price})
+
+                elif dir_upper in ["LOW", "BEARISH"]:
+                    # Check Stop Loss (only if TP1 hasn't been hit yet)
+                    if not trade["tp1_hit"] and not trade["sl_hit"]:
+                        if current_price >= trade["sl_price"]:
+                            trade["sl_hit"] = True
+                            completed_ids.append(trade_id)
+                            events.append({"event": "SL", "trade": dict(trade), "exit_price": current_price})
+                            continue
+
+                    # Check Target 1
+                    if not trade["tp1_hit"] and current_price <= trade["tp1_price"]:
+                        trade["tp1_hit"] = True
+                        events.append({"event": "TP1", "trade": dict(trade), "exit_price": current_price})
+
+                    # Check Target 2
+                    if trade["tp1_hit"] and not trade["tp2_hit"] and current_price <= trade["tp2_price"]:
+                        trade["tp2_hit"] = True
+                        completed_ids.append(trade_id)
+                        events.append({"event": "TP2", "trade": dict(trade), "exit_price": current_price})
+
+            for tid in completed_ids:
+                self._active_trades.pop(tid, None)
+
+        return events
+
