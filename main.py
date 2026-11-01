@@ -5,6 +5,7 @@ Telegram Dispatcher, Config Hot-Reloading, and System Heartbeats.
 """
 
 import asyncio
+import datetime
 import json
 import logging
 import logging.handlers
@@ -25,6 +26,10 @@ from config import (
     get_previous_candle_timestamps,
     parse_timeframe_to_seconds,
     seconds_until_next_candle_close,
+    IST_TZ,
+    get_ist_now,
+    format_ist_time,
+    get_ist_time_components,
 )
 from state_manager import (
     BoundaryState,
@@ -83,10 +88,14 @@ def setup_logging(log_file_path: str):
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
+    def ist_time_converter(secs):
+        return datetime.datetime.fromtimestamp(secs, tz=IST_TZ).timetuple()
+
     formatter = logging.Formatter(
         "[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    formatter.converter = ist_time_converter
 
     # Console Handler
     console_handler = logging.StreamHandler(sys.stdout)
@@ -166,7 +175,7 @@ class TelegramNotifier:
                 try:
                     async with session.post(url, json=payload, timeout=10) as resp:
                         if resp.status == 200:
-                            health_monitor.record_alert_sent()
+                            health_monitor.record_message_sent()
                             logger.info("Telegram notification sent successfully.")
                             return True
                         else:
@@ -217,7 +226,7 @@ class TelegramNotifier:
                 try:
                     async with session.post(url, data=data, timeout=15) as resp:
                         if resp.status == 200:
-                            health_monitor.record_alert_sent()
+                            health_monitor.record_message_sent()
                             logger.info("Telegram photo alert sent successfully.")
                             if send_full_text_after:
                                 await self.send_message(caption, bypass_mute=bypass_mute)
@@ -452,6 +461,7 @@ async def evaluate_price_tick(
                     f"<b>Elapsed Time:</b> {mins} mins\n\n"
                     f"✨ <i>Risk:Reward 1:{config_mgr.target_1_rr:.1f} Achieved! You may lock in profit or move SL to Breakeven.</i>"
                 )
+                health_monitor.record_lifecycle_alert()
                 await notifier.send_message(msg)
 
             elif ev["event"] == "TP2":
@@ -464,6 +474,7 @@ async def evaluate_price_tick(
                     f"<b>Elapsed Time:</b> {mins} mins\n\n"
                     f"🔥 <i>Risk:Reward 1:{config_mgr.target_2_rr:.1f} Max Profit Target Hit!</i>"
                 )
+                health_monitor.record_lifecycle_alert()
                 await notifier.send_message(msg)
 
             elif ev["event"] == "SL":
@@ -477,6 +488,7 @@ async def evaluate_price_tick(
                     f"<b>Elapsed Time:</b> {mins} mins\n\n"
                     f"⚠️ <i>Trade setup exited at risk boundary.</i>"
                 )
+                health_monitor.record_lifecycle_alert()
                 await notifier.send_message(msg)
 
     # ------------------------------------------------------------------
@@ -498,7 +510,7 @@ async def evaluate_price_tick(
                 f"<b>Broken Level:</b> {cur}{ret['boundary_level']:,.2f}\n"
                 f"<b>Retest Level:</b> {cur}{ret['pullback_extreme']:,.2f}\n"
                 f"<b>Bounce Price:</b> {cur}{ret['bounce_price']:,.2f} ({bounce_pct:+.2f}%)\n"
-                f"<b>Timestamp:</b> {time.strftime('%Y-%m-%d %H:%M:%S IST')}\n\n"
+                f"<b>Timestamp:</b> {format_ist_time()}\n\n"
                 f"🔥 <i>High-probability retest continuation confirmed!</i>\n"
                 f"📈 <a href='{chart_url}'>View on Delta Exchange</a>"
             )
@@ -510,6 +522,7 @@ async def evaluate_price_tick(
                     norm_symbol, ret["timeframe"], boundary.raw_candles, ret["boundary_level"], ret["direction"], current_price, cur
                 )
 
+            health_monitor.record_retest_alert()
             if chart_buf:
                 await notifier.send_photo(chart_buf.getvalue(), retest_msg)
             else:
@@ -633,8 +646,8 @@ async def evaluate_price_tick(
                     msg_parts.append("\n".join(tech_lines))
 
                 msg_parts.append(
-                    f"\n<b>Candle Period:</b> {time.strftime('%Y-%m-%d %H:%M IST', time.localtime(candle_time))}\n"
-                    f"<b>Timestamp:</b> {time.strftime('%Y-%m-%d %H:%M:%S IST')}\n\n"
+                    f"\n<b>Candle Period:</b> {format_ist_time(candle_time, '%Y-%m-%d %H:%M IST')}\n"
+                    f"<b>Timestamp:</b> {format_ist_time()}\n\n"
                     f"📈 <a href='{chart_url}'>View on Delta Exchange</a>"
                 )
 
@@ -650,6 +663,7 @@ async def evaluate_price_tick(
                         norm_symbol, tf, boundary.raw_candles, high_level, "HIGH", current_price, currency_symbol
                     )
 
+                health_monitor.record_breakout_alert()
                 if chart_buf:
                     await notifier.send_photo(chart_buf.getvalue(), alert_text)
                 else:
@@ -776,8 +790,8 @@ async def evaluate_price_tick(
                     msg_parts.append("\n".join(tech_lines))
 
                 msg_parts.append(
-                    f"\n<b>Candle Period:</b> {time.strftime('%Y-%m-%d %H:%M IST', time.localtime(candle_time))}\n"
-                    f"<b>Timestamp:</b> {time.strftime('%Y-%m-%d %H:%M:%S IST')}\n\n"
+                    f"\n<b>Candle Period:</b> {format_ist_time(candle_time, '%Y-%m-%d %H:%M IST')}\n"
+                    f"<b>Timestamp:</b> {format_ist_time()}\n\n"
                     f"📉 <a href='{chart_url}'>View on Delta Exchange</a>"
                 )
 
@@ -793,6 +807,7 @@ async def evaluate_price_tick(
                         norm_symbol, tf, boundary.raw_candles, low_level, "LOW", current_price, currency_symbol
                     )
 
+                health_monitor.record_breakout_alert()
                 if chart_buf:
                     await notifier.send_photo(chart_buf.getvalue(), alert_text)
                 else:
@@ -981,9 +996,12 @@ async def heartbeat_task(notifier: TelegramNotifier):
                 f"<b>Active Symbols:</b> {', '.join(config_mgr.symbols)}\n"
                 f"<b>WS Messages Processed:</b> {summary['total_ws_messages']:,}\n"
                 f"<b>REST Boundary Fetches:</b> {summary['total_rest_fetches']:,}\n"
-                f"<b>Total Alerts Fired:</b> {summary['total_alerts_sent']}\n"
+                f"<b>Breakout Alerts Fired:</b> {summary['total_breakout_alerts']}\n"
+                f"<b>Retest Confirmed Alerts:</b> {summary['total_retest_alerts']}\n"
+                f"<b>Lifecycle Updates (TP/SL):</b> {summary['total_lifecycle_alerts']}\n"
+                f"<b>Total Telegram Messages:</b> {summary['total_messages_sent']}\n"
                 f"<b>Reconnections:</b> {summary['reconnect_count']}\n"
-                f"<b>Timestamp:</b> {time.strftime('%Y-%m-%d %H:%M:%S IST')}"
+                f"<b>Timestamp:</b> {format_ist_time()}"
             )
             await notifier.send_message(heartbeat_msg)
         except asyncio.CancelledError:
@@ -1086,8 +1104,11 @@ async def telegram_command_listener_task(notifier: TelegramNotifier):
                                     f"<b>Uptime:</b> {summary['uptime']}\n"
                                     f"<b>Active Pairs:</b> {len(config_mgr.get_active_pairs())}\n"
                                     f"<b>WS Messages:</b> {summary['total_ws_messages']:,}\n"
-                                    f"<b>Alerts Sent:</b> {summary['total_alerts_sent']}\n"
-                                    f"<b>Timestamp:</b> {time.strftime('%Y-%m-%d %H:%M:%S IST')}"
+                                    f"<b>Breakouts Fired:</b> {summary['total_breakout_alerts']}\n"
+                                    f"<b>Retests Confirmed:</b> {summary['total_retest_alerts']}\n"
+                                    f"<b>Lifecycle Updates:</b> {summary['total_lifecycle_alerts']}\n"
+                                    f"<b>Bot Messages:</b> {summary['total_messages_sent']}\n"
+                                    f"<b>Timestamp:</b> {format_ist_time()}"
                                 )
                                 await notifier.send_message(reply, bypass_mute=True)
 
@@ -1198,10 +1219,7 @@ async def alert_audit_scheduler_task(notifier: TelegramNotifier):
 
     while True:
         try:
-            now = time.time()
-            current_hm = time.strftime("%H:%M", time.localtime(now))
-            current_ymd = time.strftime("%Y-%m-%d", time.localtime(now))
-            current_day = time.strftime("%a", time.localtime(now)).upper()
+            current_day, current_hm, current_ymd = get_ist_time_components()
 
             # 1. Daily Audit Dispatch
             if config_mgr.enable_daily_audit_report:
@@ -1245,8 +1263,8 @@ async def health_server_task():
             "ws_connected": summary.get("is_ws_connected", False),
             "uptime": summary.get("uptime", ""),
             "active_pairs": len(config_mgr.get_active_pairs()),
-            "alerts_sent": summary.get("total_alerts_sent", 0),
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S IST")
+            "alerts_sent": summary.get("total_breakout_alerts", 0),
+            "timestamp": format_ist_time()
         })
 
     app.router.add_get("/", handle_root)
@@ -1300,7 +1318,7 @@ async def async_main():
         f"<b>Monitored Symbols:</b> {', '.join(config_mgr.symbols)}\n"
         f"<b>Active Symbol-Timeframe Pairs:</b> {len(active_pairs)}\n"
         f"<b>Service Mode:</b> {service_mode}\n"
-        f"<b>Timestamp:</b> {time.strftime('%Y-%m-%d %H:%M:%S IST')}"
+        f"<b>Timestamp:</b> {format_ist_time()}"
     )
     await notifier.send_message(startup_msg)
 

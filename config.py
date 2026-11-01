@@ -7,10 +7,40 @@ import json
 import os
 import sys
 import time
+import datetime
 import logging
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger("DeltaAlerts.Config")
+
+IST_OFFSET = datetime.timedelta(hours=5, minutes=30)
+IST_TZ = datetime.timezone(IST_OFFSET, name="IST")
+
+
+def get_ist_now() -> datetime.datetime:
+    """Returns current datetime in Indian Standard Time (IST, UTC+05:30)."""
+    return datetime.datetime.now(IST_TZ)
+
+
+def format_ist_time(epoch: Optional[float] = None, fmt: str = "%Y-%m-%d %H:%M:%S IST") -> str:
+    """Formats epoch timestamp (seconds) or current time into an IST formatted string."""
+    if epoch is None:
+        dt = get_ist_now()
+    else:
+        dt = datetime.datetime.fromtimestamp(epoch, tz=IST_TZ)
+    return dt.strftime(fmt)
+
+
+def get_ist_time_components(reference_time: Optional[float] = None) -> tuple[str, str, str]:
+    """
+    Returns (day_abbr, current_hm, current_ymd) in IST.
+    e.g. ('SUN', '19:15', '2026-11-01')
+    """
+    if reference_time is None:
+        dt = get_ist_now()
+    else:
+        dt = datetime.datetime.fromtimestamp(reference_time, tz=IST_TZ)
+    return dt.strftime("%a").upper(), dt.strftime("%H:%M"), dt.strftime("%Y-%m-%d")
 
 
 def _load_env_file():
@@ -371,14 +401,11 @@ class ConfigManager:
         if not schedule or not isinstance(schedule, dict):
             return True
 
-        now = reference_time if reference_time is not None else time.time()
-        day_abbr = time.strftime("%a", time.localtime(now)).upper()
+        day_abbr, current_hm, _ = get_ist_time_components(reference_time)
 
         day_ranges = schedule.get(day_abbr, [])
         if not day_ranges or not isinstance(day_ranges, list):
             return False
-
-        current_hm = time.strftime("%H:%M", time.localtime(now))
 
         for r in day_ranges:
             if isinstance(r, dict):
@@ -386,6 +413,8 @@ class ConfigManager:
                 end_time = str(r.get("END", "23:59"))
                 if start_time <= current_hm <= end_time:
                     return True
+
+        return False
 
     @property
     def us_stocks_filter_enabled(self) -> bool:
@@ -409,8 +438,7 @@ class ConfigManager:
 
         sym_upper = symbol.upper()
         if self.us_stocks_filter_enabled and sym_upper in [s.upper() for s in self.us_stocks]:
-            now = reference_time if reference_time is not None else time.time()
-            current_hm = time.strftime("%H:%M", time.localtime(now))
+            _, current_hm, _ = get_ist_time_components(reference_time)
             start_time = str(self.us_stocks_active_hours_ist.get("START", "18:30"))
             end_time = str(self.us_stocks_active_hours_ist.get("END", "23:59"))
 

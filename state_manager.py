@@ -10,6 +10,7 @@ import os
 import json
 from dataclasses import dataclass
 from typing import Dict, Tuple, Optional, Any, Set, List
+from config import format_ist_time
 
 logger = logging.getLogger("DeltaAlerts.StateManager")
 
@@ -276,7 +277,10 @@ class HealthMonitor:
         self.start_time: float = time.time()
         self.total_ws_messages: int = 0
         self.total_rest_fetches: int = 0
-        self.total_alerts_sent: int = 0
+        self.total_breakout_alerts: int = 0
+        self.total_retest_alerts: int = 0
+        self.total_lifecycle_alerts: int = 0
+        self.total_messages_sent: int = 0
         self.last_ws_message_time: float = 0.0
         self.is_ws_connected: bool = False
         self.reconnect_count: int = 0
@@ -290,9 +294,26 @@ class HealthMonitor:
         with self._lock:
             self.total_rest_fetches += 1
 
-    def record_alert_sent(self):
+    def record_breakout_alert(self):
         with self._lock:
-            self.total_alerts_sent += 1
+            self.total_breakout_alerts += 1
+
+    def record_retest_alert(self):
+        with self._lock:
+            self.total_retest_alerts += 1
+
+    def record_lifecycle_alert(self):
+        with self._lock:
+            self.total_lifecycle_alerts += 1
+
+    def record_message_sent(self):
+        with self._lock:
+            self.total_messages_sent += 1
+
+    def record_alert_sent(self):
+        """Legacy helper for message dispatch tracking."""
+        with self._lock:
+            self.total_messages_sent += 1
 
     def set_ws_connected(self, connected: bool):
         with self._lock:
@@ -318,7 +339,11 @@ class HealthMonitor:
                 "reconnect_count": self.reconnect_count,
                 "total_ws_messages": self.total_ws_messages,
                 "total_rest_fetches": self.total_rest_fetches,
-                "total_alerts_sent": self.total_alerts_sent,
+                "total_breakout_alerts": self.total_breakout_alerts,
+                "total_retest_alerts": self.total_retest_alerts,
+                "total_lifecycle_alerts": self.total_lifecycle_alerts,
+                "total_alerts_sent": self.total_breakout_alerts,
+                "total_messages_sent": self.total_messages_sent,
                 "seconds_since_last_ws": seconds_since_last_ws,
             }
 
@@ -335,7 +360,7 @@ class MuteState:
     def mute(self, minutes: int):
         with self._lock:
             self._mute_until = time.time() + max(1, minutes) * 60.0
-            logger.info(f"Alerts muted for {minutes} minutes (until {time.strftime('%H:%M:%S', time.localtime(self._mute_until))})")
+            logger.info(f"Alerts muted for {minutes} minutes (until {format_ist_time(self._mute_until, '%H:%M:%S IST')})")
 
     def unmute(self):
         with self._lock:

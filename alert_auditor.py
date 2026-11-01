@@ -14,7 +14,7 @@ import time
 from typing import Dict, List, Optional, Any
 import aiohttp
 
-from config import ConfigManager, parse_timeframe_to_seconds, normalize_symbol
+from config import ConfigManager, parse_timeframe_to_seconds, normalize_symbol, IST_TZ, format_ist_time
 
 logger = logging.getLogger("DeltaAlerts.Auditor")
 
@@ -54,7 +54,7 @@ class AlertAuditor:
                         if m:
                             d = m.groupdict()
                             try:
-                                dt_obj = datetime.datetime.strptime(d["dt"], "%Y-%m-%d %H:%M:%S")
+                                dt_obj = datetime.datetime.strptime(d["dt"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST_TZ)
                                 epoch = dt_obj.timestamp()
                                 if epoch < cutoff_epoch:
                                     continue
@@ -304,7 +304,7 @@ class AlertAuditor:
             return (
                 f"📊 <b>{title_prefix} ({time_label})</b> 📊\n\n"
                 f"ℹ️ <i>No breakout alerts were recorded during this period.</i>\n\n"
-                f"⏱ <b>Generated:</b> {time.strftime('%Y-%m-%d %H:%M:%S IST')}"
+                f"⏱ <b>Generated:</b> {format_ist_time()}"
             )
 
         win_rate = audit.get("win_rate", 0.0)
@@ -357,5 +357,5 @@ class AlertAuditor:
             sym_lines = [f"• #{sym}: {d['win_rate']:.0f}% Win Rate ({d['wins']}/{d['total']})" for sym, d in top_syms]
             lines.append(f"\n🏆 <b>TOP SYMBOLS</b>\n" + "\n".join(sym_lines))
 
-        lines.append(f"\n⏱ <b>Generated:</b> {time.strftime('%Y-%m-%d %H:%M:%S IST')}")
+        lines.append(f"\n⏱ <b>Generated:</b> {format_ist_time()}")
         return "\n".join(lines)
